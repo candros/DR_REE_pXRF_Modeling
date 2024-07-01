@@ -1,0 +1,458 @@
+```{r}
+# First block: CoDa preprocessing of the bulk data
+
+library(zCompositions)
+library(compositions)
+library("plyr")
+
+# Define the detection limits of the data (ICP-OES)
+dl_bulk = data.frame(tic= c(0.05),	roc= c(0.05),	toc= c(0.05),	tn= c(0.05),	tc= c(0.05),	ts= c(0.05),	ag= c(0.005),
+                     al= c(0.005),	arsenic= c(0.005),	b= c(0.005),	ba= c(0.005),	be= c(0.005),	ca= c(0.005),	cd= c(0.005),
+                     co= c(0.005),	cr= c(0.005),	cu= c(0.005),	fe= c(0.005),	k= c(0.005),	mg= c(0.005),	mn= c(0.005),	mo= c(0.005),
+                     na= c(0.005),	ni= c(0.005),	p= c(0.005),	pb= c(0.005),	s= c(0.005),	sb= c(0.005),	se= c(0.005), si= c(0.005),
+                     sr= c(0.005),  ti= c(0.005),	tl= c(0.005),	v= c(0.005),	zn= c(0.005))
+
+dl_ree = data.frame(ce= c(0.005),	dy= c(0.005), er	= c(0.005),	eu= c(0.005),	gd= c(0.005),	ho= c(0.005),	la= c(0.005),
+                     lu= c(0.005),	nd= c(0.005),	pr= c(0.005),	sc= c(0.005),	sm= c(0.005),	th= c(0.005),	tb= c(0.005),
+                     tm= c(0.005),	y= c(0.005),	yb= c(0.005))
+
+# Helper function to remove the sparse rows, default set to 40 percent for rows
+sparse_rows <- function(full_df, empty_percent = 40){
+  unparsed_df = split_data(full_df)$numerical
+  empty_rows = rowSums(unparsed_df == 0)
+  shape = dim(unparsed_df)
+  percent_rows_empty = (empty_rows/shape[2])*100
+  parsed_df = full_df[which(percent_rows_empty < empty_percent),]
+  return(parsed_df)
+}
+
+# Helper function to split dataframe into non-numeric (taxonomy) and numerical columns
+split_data <- function(full_df){
+  bool_number_col = unlist(lapply(full_df, is.numeric))
+  non_numeric = full_df[,bool_number_col == FALSE]
+  numerical = full_df[,bool_number_col]
+  results <- list('non_numeric' = non_numeric, 'numerical' = numerical)
+  return(results)
+}
+
+CoDa_Pipeline <- function(df, table, min_percent_miss = 5, name_addition = '', remove_cols = c(), write = FALSE){
+#' This function removes incomplete samples and sparse columns comprising mostly measured zeros, imputes zeros, closes the composition,
+#'performs a clr transformation, and prints the transformed composition to a csv file.
+#'Takes 5 inputs:
+#'df: the dataframe that you wish to process
+#'table: the kind of data you are passing: 'bulk' or 'rare_earths'
+#'mins_percent_missing: numerical, the maximum percent of zeros in a given column
+#'name_addition: string, an identifier added to the name of the output text file
+#'remove_cols: list of strings, the database columns you want the pipeline to remove
+  
+  # Selecting only those features that are useful for modeling
+  data_df = subset(df, select = !(names(df) %in% remove_cols)) 
+  
+  # Drop null rows representing incomplete compositions
+  print('Dropping all incomplete compositions...')
+  data_df = na.omit(data_df)
+  #if (is.empty(data_df) == 1){print('Warning: Dataframe is now empty')}
+  
+  # Remove the sparse columns (< min_percent_miss) representing features that are too sparse to be of use
+  print('Dropping spare columns...')
+  shape = dim(data_df)
+  empty_cols = colSums(data_df == 0)
+  percent_cols_empty = empty_cols/shape[1]*100
+  data_df = data_df[,percent_cols_empty < min_percent_miss]
+  
+  # Remove the sparse rows of data (< min_percent_miss)
+  data_df = sparse_rows(data_df)
+  split_list = split_data(data_df)
+  
+  # Determine the appropriate set of detection limits
+  print('Reading in the detection limits...')
+ if (table == 'bulk') {
+      dl_df = dl_bulk
+  }
+  else if (table == 'rare_earths') {
+      dl_df = dl_ree
+  }
+  else{
+          
+        }
+  dl_final = dl_df[,names(split_list$numerical)]
+  
+  # Convert the Data Frames to matrices
+  data_matrix = as.matrix(split_list$numerical)
+  dl_matrix = as.matrix(dl_final)
+  
+  Zpatterns_message = 'Printing the zero-patterns in the dataset:'
+  print(noquote(Zpatterns_message))
+  error_message = 'Cannot print the zPatterns matrix'
+  results = tryCatch({zPatterns(data_matrix, label = 0)},
+                     warning = function(w) {print('warning')},
+                     error = function(e) {print(noquote(error_message))},
+                     finally = {})
+  
+  # Perform zero imputation: 2 options, if you have more than 10% missing values use lrEM
+  # Next, close the composition (i.e., make all rows sum to 1)
+  #dz_matrix <- multRepl(X = we_mat_matrix, label = 0, dl = dl_we_matrix)
+  if (typeof(results) != "character"){
+    processing_message = 'Performing Log-ratio Expectation-Maximization (LrEM) zero imputation for values below the detection limit:'
+    print(noquote(processing_message))
+    imputed_matrix <- lrEM(data_matrix, label = 0, dl_matrix, ini.cov = "multRepl")
+  } else{
+    imputed_matrix <- data_matrix
+  }
+  
+  # Transform the closed data with a clr transformation
+  clo_df = clo(imputed_matrix, total = 100)
+  coda_df = data.frame(compositions::clr(clo_df))
+  complete_df = cbind(split_list$non_numeric, coda_df)
+  complete_df = rename(complete_df, c('split_list$non_numeric' = 'sampleid'))
+
+  if (write == TRUE) {
+  # Export the closed, transformed dataset to a csv file
+  fid = paste("clr.", table, name_addition, '.csv',sep="",collapse=NULL)
+  write.csv(complete_df, fid, row.names = F)
+  }
+  else {
+    return(complete_df)
+  }
+}
+
+bulk_df = read.csv('DR_bulk_comp.csv')
+
+bulk_coda = CoDa_Pipeline(bulk_df, 'bulk')
+
+```
+
+```{r}
+# CoDa process the pXRF data (Thermo Niton 5 XL Plus)
+
+library(zCompositions)
+library(compositions)
+
+## Pull in and CoDa transform the P-XRF data
+
+# Define the global variable detection limits for the P-XRF
+dl_df = data.frame(Ag=c(0.0003),	Al=c(0.0003),	As=c(0.0003),	Au=c(0.0003),	Ba=c(0.0003),	Bal=c(0.0003),
+                   Bi=c(0.0003),	Ca=c(0.0003),	Cd=c(0.0003),	Ce=c(0.0003),	Cl=c(0.0003),	Co=c(0.0003),
+                   Cr=c(0.0003),	Cu=c(0.0003),	Fe=c(0.0003),	K=c(0.0003),	La=c(0.0003),	Mg=c(0.0003),
+                   Mn=c(0.0003),	Mo=c(0.0003),	Nb=c(0.0003),	Nd=c(0.0003),	Ni=c(0.0003),	P=c(0.0003),
+                   Pb=c(0.0003),	Pr=c(0.0003),	Rb=c(0.0003),	S=c(0.0003),	Sb=c(0.0003),	Sc=c(0.0003),
+                   Se=c(0.0003),	Si=c(0.0003),	Sn=c(0.0003),	Sr=c(0.0003),	Th=c(0.0003),	Ti=c(0.0003),
+                   U=c(0.0003),	V=c(0.0003),	W=c(0.0003),	Y=c(0.0003),	Zn=c(0.0003),	Zr=c(0.0003))
+
+# Define function to add the sigma values into the measured P-XRF concentrations 
+# and remove columns not included in the calibration model (Hf, Re, Ta)
+prepare_data <- function(raw_df){
+
+  # Fill all NA and <LOD values with 0, need to find a more robust method to deal with any string
+  raw_df[raw_df == '<LOD'] <- 0
+  raw_df[raw_df == ''] <- 0
+  raw_df[is.na(raw_df)] = 0
+  
+  # Set the column names so they are discoverable
+  sample_column = 'Sample'
+  names(raw_df) <- gsub('[0-9.]', '', gsub('[[:punct:] ]+','',names(raw_df)))
+  
+  # Sort out the raw data into 3 dataframes: concentrations, sample names and sigma values
+  data_df <- raw_df[,names(dl_df)]
+  sigma_df = raw_df[,paste(names(dl_df), 'Sigma', sep = '')]
+  names(sigma_df) = names(data_df)
+  name_df = raw_df[sample_column]
+  
+  # Add the sigma values into the measured concentrations
+  data_df <- data.frame(lapply(data_df, as.numeric))
+  data_df = sigma_df + data_df
+  
+  return(list("names" = name_df, "data" = data_df))
+}
+
+# Define a function to perform an LrEM zero imputation and an ALR transform
+coda_transform <- function(data_df){
+  
+  # If any columns are all 0, add 1e-10 to it (LrEM can't impute a column of all 0s)
+  for (i in length(names(data_df))){
+    if (sum(data_df[,i] == 0)){data_df[,i] = data_df[,i] + 1e-10}
+  }
+  
+  # Perform the zero imputation
+  data_matrix = as.matrix(data_df)
+  dl_matrix = as.matrix(dl_df)
+  
+  imputed_matrix <- lrEM(data_matrix, label = 0, dl_matrix, ini.cov = "multRepl")
+  
+  # Transform the closed data with an alr transformation, normalized to Si
+  clo_df = clo(imputed_matrix, total = 100)
+coda_df = compositions::alr(clo_df, 'Si')
+
+  return(coda_df)
+}
+
+# Read in the P-XRF data
+pxrf_data = read.csv('DR PXRF Data Apr 2023.csv')
+
+# Process the data
+processed <- prepare_data(pxrf_data)  # need to make this function deal with extra columns
+
+# Coda Transform
+pxrf_df <- data.frame(coda_transform(processed$data))
+sample_names = processed$names
+pxrf_df = cbind(sample_names, pxrf_df)
+
+#write.csv(pxrf_df, file = 'pxrf_processed.csv', row.names = F)
+```
+
+```{python}
+import pandas as pd
+
+# Process the Nixpro color data reported from the DR (Author: Harold Rojas)
+color = pd.read_excel('Samples by color2.xlsx')
+name = []
+R = []
+G = []
+B = []
+for a, b in color[['Deposit', 'depth type']].values:
+  name.append(a+'_'+b)
+color['sampleid'] = name
+color = color.set_index('Deposit')
+for x in color['RGB'].values:
+  a = x.split()
+  R.append(int(a[0].split(':')[-1]))
+  G.append(int(a[1].split(':')[-1]))
+  B.append(int(a[2].split(':')[-1]))
+  
+color['R'] = R
+color['B'] = B
+color['G'] = G
+
+color = color[['sampleid', 'R', 'B', 'G']]
+
+#color.to_csv('color_processed.csv', index = False)
+```
+
+```{python}
+# Preliminary model selection
+
+from sklearn.svm import SVR
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import GridSearchCV, cross_val_score, KFold
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import ExtraTreesRegressor
+from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
+from sklearn.neighbors import KNeighborsRegressor
+
+# Helper function to perform cross validation and grid search over a grid of hyperparameters and ML algorithms.
+def model_runs(X_data, y_data, grid_list):
+    
+    frames = []
+    
+    # Loop through the provided models
+    for grid in grid_list:
+        model = grid['model']
+        p_grid = grid['grid']
+        
+        # Cross-validation
+        inner_cv = KFold(n_splits=3, shuffle=True, random_state=42)
+        
+        # Nested CV with parameter optimization
+        search = GridSearchCV(estimator=model, param_grid=p_grid, cv=inner_cv, scoring='neg_mean_absolute_error')
+        search.fit(X_data, y=y_data)
+        
+        # Bundle the results for reporting
+        results = [grid['name'], search.best_score_]        
+        frames.append(results)
+
+        print('Results for:', model)
+        print('the best score is:',search.best_score_)
+        print('the best parameters are:',search.best_params_)
+        print('\n')
+        
+    # Write the results to a dataframe
+    results_df = pd.DataFrame(frames, columns=['Model Name', 'Grid Search Score'])
+    return results_df
+  
+# List of candidate models and their hyperparameters
+linear_grid = {'fit_intercept':[True, False]}
+linear_dict = {'model': LinearRegression(),
+               'grid': linear_grid,
+               'name': 'Linear Model'}
+
+# Support Vector Machine Learning Parameters
+SVR_grid = {"C": [1000, 10000],
+            "gamma":[0.001, 0.01 ,'scale'],
+            "kernel": ['rbf', 'poly', 'linear']}
+SVM_dict = {'model': SVR(),
+             'grid': SVR_grid,
+           'name': 'Support Vector Machine'}
+
+# Extra Trees Random Forest Learning Parameters
+ET_grid = {"n_estimators": [100, 300],
+          "max_features": ['sqrt', 'log2', None],
+          "min_samples_split": [2, 3],
+          "min_samples_leaf": [1, 2]} 
+ET_dict = {'model': ExtraTreesRegressor(),
+             'grid': ET_grid,
+          'name': 'Extra Trees Random Forest'}
+
+# Random Forest Learning Parameters
+RF_grid = {"n_estimators": [100, 300],
+          "max_features": ['sqrt', 'log2', None],
+          "min_samples_split": [2, 3],
+          "min_samples_leaf": [1, 2]} 
+RF_dict = {'model': RandomForestRegressor(),
+             'grid': RF_grid,
+          'name': 'Random Forest'}
+
+# XGBoost learning Parameters
+XGB_grid = {"n_estimators": [100, 200],
+           "eval_metric": ['mlogloss', 'merror'],
+           "booster": ['gbtree', 'gblinear']}
+XGB_dict = {'model': XGBRegressor(),
+            'grid': XGB_grid,
+           'name': 'XGBoost'}
+
+# K-Nearest Neighbors Learning Parameters
+KNN_grid = {"n_neighbors": [1,2,3],
+             "weights": ['uniform', 'distance'],
+             "p":[1,2]}
+KNN_dict = {'model': KNeighborsRegressor(),
+            'grid': KNN_grid,
+           'name': 'K-Nearest Neighbors'}
+
+models_list = [linear_dict, SVM_dict, ET_dict, RF_dict, XGB_dict, KNN_dict]
+
+# Perform nested cross validation to perform model selection
+
+# All soils were subsampled in triplicate for ICP analysis, take the median of these triplicates so as to not influence the data and merge with the pXRF data. Note, 10 unique spots on each soil were measured with the pXRF instrument, giving a total of 10 unique pXRF readings per soil.
+pxrf_df = r.pxrf_df
+ree_df = pd.read_csv('ree.csv')
+target = 'REE sum'
+ree_df['sample'] = ree_df['sampleid'].apply(lambda x: x[:-1])
+ree_df.drop('sampleid', axis=1, inplace = True)
+ree_df = ree_df.groupby('sample').median()
+ree_df[target] = ree_df.sum(axis=1)
+merged_df = pd.merge(pxrf_df.set_index('Sample'), ree_df[target], left_index = True, right_index = True)
+
+# Create the X and Y dataframes
+df_X = merged_df.iloc[:,:-1]
+df_y = merged_df[target]
+
+# Grid Search Cross Validation
+to_run = models_list
+GridCV_df = model_runs(df_X, df_y, to_run)
+
+```
+
+```{python}
+## Function to run the bin stratification and validate the model results
+
+# Library imports
+from sklearn.model_selection import train_test_split
+import pickle
+from sklearn.ensemble import ExtraTreesRegressor
+from sklearn import metrics
+import pandas as pd
+import numpy as np 
+import random
+
+# Model selection function
+def model_selection(X, y, composition, iters = 500, num_bins = 50, addendum = ''):
+  '''
+  Runs resampling for X number of iterations (default = 500) to identify the optimal model for each of the different datasets. Uses bin stratification **Only works for continuous variables**
+  '''
+  mse_ree = 1000000
+  r2_ree = 0.2
+  final_mse = 0
+  final_r2 = 0
+  bins = np.linspace(0, max(y), num_bins)
+  y_binned = np.digitize(y, bins)
+    
+  errors = []
+  r2s = []
+  
+  # 70 / 15 / 15 train / test / validate split 
+  X_training, X_validate, y_training, y_validate = train_test_split(X, y, test_size = 0.15, shuffle=True, stratify=y_binned)
+  
+  bins = np.linspace(0, max(y_training), num_bins)
+  y_binned_training = np.digitize(y_training, bins)
+    
+  for i in range(iters):
+    # 70-15 train-test split, test size set to 18% to ensure it is 15% of the original data set
+    X_train, X_test, y_train, y_test = train_test_split(X_training, y_training, test_size = 0.18, shuffle=True, stratify=y_binned_training)
+
+    # Create the model
+    model = ExtraTreesRegressor()
+    model.fit(X_train, y_train)
+    y_true = y_test
+    y_pred = model.predict(X_test)
+    mse = metrics.mean_squared_error(y_true, y_pred)
+    r2 = metrics.r2_score(y_true, y_pred)
+
+    # Check to see if that split performs better than all previous
+    if (mse < mse_ree) and (r2 > r2_ree):
+      final_model = model
+      final_mse = mse
+      final_pred = y_pred
+      final_true = y_true
+      final_r2 = r2
+      final_train = (X_train, X_test, X_validate, y_train, y_test, y_validate)
+      mse_ree = mse
+      r2_ree = r2
+    
+    # Collect the performance of each split
+    errors.append(mse)
+    r2s.append(r2)
+    
+  # Show the performance of the validation set
+  validate_pred = model.predict(X_validate)
+  validate_mse = metrics.mean_squared_error(y_validate, validate_pred)
+  validate_r2 = metrics.r2_score(y_validate, validate_pred)
+        
+  print('test mse:',final_mse, 'test r-squared:', final_r2)
+  print('validate mse:',validate_mse, 'validate r-squared:', validate_r2)
+  print('average error:',np.mean(errors))
+
+  # Once the algorithm identifies the optimal train-test split, save the result in a pickle file
+  pickle_fid = composition + '_results_end_to_end-check'+addendum+'.pkl'
+  results = (errors, final_train, final_model)
+  #with open(pickle_fid, "wb") as fp:
+      #pickle.dump(results, fp)
+```
+
+```{python}
+## Run each of the three compositions through the same modeling routine and save the results
+# Note, the color data was so spare, bin stratification was not performed
+
+# Collect the REE data
+ree_df = pd.read_csv('ree.csv')
+ree_df['sampleid'] = ree_df['sampleid'].apply(lambda x: x[:-1])
+ree_df = ree_df.drop('th', axis=1)
+targets_df = ree_df.groupby('sampleid').median()
+targets_df['sum'] = targets_df.sum(axis=1)
+targets_df = targets_df.reset_index()
+target_df = targets_df[['sampleid', 'sum']]
+
+# Process the bulk composition and combine with REE data
+bulk = pd.read_csv('bulk.csv')
+bulk['sampleid'] = bulk['split_list$non_numeric'].apply(lambda x: x[:-1])
+bulk_data = pd.merge(bulk, target_df, on = 'sampleid')
+bulk_data = bulk_data.set_index('split_list$non_numeric')
+bulk_data = bulk_data.drop('sampleid',axis=1)
+model_selection(bulk_data[bulk_data.columns[:-1]], bulk_data['sum'], 'bulk', iters=1000, addendum = 'test_run')
+
+# Process and run the PXRF data
+pxrf = r.pxrf_df
+pxrf['sampleid'] = pxrf['Sample']
+pxrf_data = pd.merge(pxrf, target_df, on = 'sampleid')
+pxrf_data = pxrf_data.set_index('Sample')
+pxrf_data = pxrf_data.drop('sampleid',axis=1)
+model_selection(pxrf_data[pxrf_data.columns[:-1]], pxrf_data['sum'], 'pxrf', iters = 1000, addendum = 'test_run')
+
+# Process and run the color data
+color_data = pd.merge(color, target_df, on = 'sampleid')
+color_data = color_data.set_index('sampleid')
+model_selection(color_data[['R','B','G']], color_data['sum'], 'color', iters = 1000, num_bins = 1, addendum = 'test_run')
+
+```
+
+
